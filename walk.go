@@ -212,7 +212,6 @@ func visitChannel(v chan VisitData) {
 	}
 }
 
-// func visitFile(v chan VisitData, path string, info os.FileInfo, walkFn WalkFunc) {
 func (file VisitData) visit(v chan VisitData) {
 	err := file.walkFn(file.path, file.info, nil)
 	if err != nil || !file.info.IsDir() {
