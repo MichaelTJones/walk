@@ -14,6 +14,168 @@ import (
 	"sync"
 )
 
+// SkipDir is used as a return value from WalkFuncs to indicate that
+// the directory named in the call is to be skipped. It is not returned
+// as an error by any function.
+var SkipDir = errors.New("skip this directory")
+
+// WalkFunc is the type of the function called for each file or directory
+// visited by Walk. The path argument contains the argument to Walk as a
+// prefix; that is, if Walk is called with "dir", which is a directory
+// containing the file "a", the walk function will be called with argument
+// "dir/a". The info argument is the os.FileInfo for the named path.
+//
+// If there was a problem walking to the file or directory named by path, the
+// incoming error will describe the problem and the function can decide how
+// to handle that error (and Walk will not descend into that directory). If
+// an error is returned, processing stops. The sole exception is that if path
+// is a directory and the function returns the special value SkipDir, the
+// contents of the directory are skipped and processing continues as usual on
+// the next file.
+type WalkFunc func(path string, info os.FileInfo, err error) error
+
+var lstat = os.Lstat // for testing
+
+type VisitData struct {
+	path   string
+	info   os.FileInfo
+	walkFn WalkFunc
+}
+
+var active sync.WaitGroup // files in process
+
+func visitChannel(v chan VisitData) {
+	for file := range v {
+		file.visit(v)
+		active.Add(-1)
+	}
+}
+
+func (file VisitData) visit(v chan VisitData) {
+	if terminated() {
+		return
+	}
+
+	err := file.walkFn(file.path, file.info, nil)
+	if err != nil {
+		if !(file.info.IsDir() && err == SkipDir) {
+			setTerminated(err)
+		}
+		return
+	}
+
+	if !file.info.IsDir() {
+		return
+	}
+
+	names, err := readDirNames(file.path)
+	if err != nil {
+		err = file.walkFn(file.path, file.info, err)
+		if err != nil {
+			setTerminated(err)
+		}
+		return
+	}
+
+	here := file.path
+	for _, name := range names {
+		file.path = Join(here, name)
+		file.info, err = lstat(file.path)
+		if err != nil {
+			err = file.walkFn(file.path, file.info, err)
+			if err != nil && (!file.info.IsDir() || err != SkipDir) {
+				setTerminated(err)
+				return
+			}
+		} else {
+			switch file.info.IsDir() {
+			case true:
+				active.Add(1) // presume channel send will succeed
+				select {
+				case v <- file:
+					// push directory info to queue for concurrent traversal
+				default:
+					// undo increment when send fails and handle now
+					active.Add(-1)
+					file.visit(v)
+				}
+			case false:
+				err = file.walkFn(file.path, file.info, nil)
+				if err != nil {
+					setTerminated(err)
+					return
+				}
+			}
+		}
+	}
+}
+
+func terminated() bool {
+	lock.RLock()
+	done := firstError != nil
+	lock.RUnlock()
+	return done
+}
+
+// record error and terminate walk
+func setTerminated(err error) {
+	lock.Lock()
+	if firstError == nil {
+		firstError = err
+	}
+	lock.Unlock()
+	return
+}
+
+// Walk walks the file tree rooted at root, calling walkFn for each file or
+// directory in the tree, including root. All errors that arise visiting files
+// and directories are filtered by walkFn. The files are walked in a random
+// order. Walk does not follow symbolic links.
+
+var lock sync.RWMutex
+var firstError error
+
+func Walk(root string, walkFn WalkFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return walkFn(root, nil, err)
+	}
+
+	v := make(chan VisitData, 1024)
+	defer close(v)
+
+	active.Add(1)
+	v <- VisitData{root, info, walkFn}
+
+	walkers := 16
+	for i := 0; i < walkers; i++ {
+		go visitChannel(v)
+	}
+	active.Wait()
+
+	return firstError
+}
+
+//
+// THE REMAINDER IS UNCHANGED FROM THE ORGINAL GO LIBRARY ORIGINAL
+//
+
+// readDirNames reads the directory named by dirname and returns
+// a sorted list of directory entries.
+func readDirNames(dirname string) ([]string, error) {
+	f, err := os.Open(dirname)
+	if err != nil {
+		return nil, err
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names) // omit sort to save 1-2%
+	return names, nil
+}
+
 // A lazybuf is a lazily constructed path buffer.
 // It supports append, reading previously appended bytes,
 // and retrieving the final string. It does not allocate a buffer
@@ -173,114 +335,4 @@ func Join(elem ...string) string {
 		}
 	}
 	return ""
-}
-
-// SkipDir is used as a return value from WalkFuncs to indicate that
-// the directory named in the call is to be skipped. It is not returned
-// as an error by any function.
-var SkipDir = errors.New("skip this directory")
-
-// WalkFunc is the type of the function called for each file or directory
-// visited by Walk. The path argument contains the argument to Walk as a
-// prefix; that is, if Walk is called with "dir", which is a directory
-// containing the file "a", the walk function will be called with argument
-// "dir/a". The info argument is the os.FileInfo for the named path.
-//
-// If there was a problem walking to the file or directory named by path, the
-// incoming error will describe the problem and the function can decide how
-// to handle that error (and Walk will not descend into that directory). If
-// an error is returned, processing stops. The sole exception is that if path
-// is a directory and the function returns the special value SkipDir, the
-// contents of the directory are skipped and processing continues as usual on
-// the next file.
-type WalkFunc func(path string, info os.FileInfo, err error) error
-
-var lstat = os.Lstat // for testing
-
-type VisitData struct {
-	path   string
-	info   os.FileInfo
-	walkFn WalkFunc
-}
-
-var active sync.WaitGroup // files in process
-
-func visitChannel(v chan VisitData) {
-	for file := range v {
-		file.visit(v)
-		active.Add(-1)
-	}
-}
-
-func (file VisitData) visit(v chan VisitData) {
-	err := file.walkFn(file.path, file.info, nil)
-	if err != nil || !file.info.IsDir() {
-		return
-	}
-	names, err := readDirNames(file.path)
-	if err != nil {
-		return
-	}
-
-	here := file.path
-	for _, name := range names {
-		file.path = Join(here, name)
-		file.info, err = lstat(file.path)
-		if err == nil {
-			switch file.info.IsDir() {
-			case true:
-				active.Add(1) // presume channel send will succeed
-				select {
-				case v <- file:
-					// push directory info to queue for concurrent traversal
-				default:
-					// undo increment when send fails and handle now
-					active.Add(-1)
-					file.visit(v)
-				}
-			case false:
-				file.walkFn(file.path, file.info, nil) // visit regular now
-			}
-		}
-	}
-}
-
-// Walk walks the file tree rooted at root, calling walkFn for each file or
-// directory in the tree, including root. All errors that arise visiting files
-// and directories are filtered by walkFn. The files are walked in lexical
-// order, which makes the output deterministic but means that for very
-// large directories Walk can be inefficient.
-// Walk does not follow symbolic links.
-
-func Walk(root string, walkFn WalkFunc) {
-	v := make(chan VisitData, 1024) // arbitrary
-	defer close(v)
-
-	info, err := os.Lstat(root)
-	if err == nil {
-		active.Add(1)
-		v <- VisitData{root, info, walkFn}
-
-		walkers := 16
-		for i := 0; i < walkers; i++ {
-			go visitChannel(v)
-		}
-		active.Wait()
-	}
-}
-
-// readDirNames reads the directory named by dirname and returns
-// a sorted list of directory entries.
-func readDirNames(dirname string) ([]string, error) {
-	f, err := os.Open(dirname)
-	if err != nil {
-		return nil, err
-	}
-	names, err := f.Readdirnames(-1)
-	f.Close()
-	if err != nil {
-		return nil, err
-	}
-	sort.Strings(names) // omit sort to save 1-2%
-	return names, nil
 }
