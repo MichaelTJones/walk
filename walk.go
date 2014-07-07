@@ -146,8 +146,6 @@ func Walk(root string, walkFn WalkFunc) error {
 		walkFn: walkFn,
 		v:      make(chan VisitData, 1024),
 	}
-
-	// v := make(chan VisitData, 1024)
 	defer close(ws.v)
 
 	ws.active.Add(1)
