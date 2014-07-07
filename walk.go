@@ -37,29 +37,50 @@ type WalkFunc func(path string, info os.FileInfo, err error) error
 var lstat = os.Lstat // for testing
 
 type VisitData struct {
-	path   string
-	info   os.FileInfo
-	walkFn WalkFunc
+	path string
+	info os.FileInfo
 }
 
-var active sync.WaitGroup // files in process
+type WalkState struct {
+	walkFn     WalkFunc
+	v          chan VisitData // files to be processed
+	active     sync.WaitGroup // files in process
+	lock       sync.RWMutex
+	firstError error // accessed using lock
+}
 
-func visitChannel(v chan VisitData) {
-	for file := range v {
-		file.visit(v)
-		active.Add(-1)
+func (ws *WalkState) terminated() bool {
+	ws.lock.RLock()
+	done := ws.firstError != nil
+	ws.lock.RUnlock()
+	return done
+}
+
+func (ws *WalkState) setTerminated(err error) {
+	ws.lock.Lock()
+	if ws.firstError == nil {
+		ws.firstError = err
+	}
+	ws.lock.Unlock()
+	return
+}
+
+func (ws *WalkState) visitChannel() {
+	for file := range ws.v {
+		ws.visitFile(file)
+		ws.active.Add(-1)
 	}
 }
 
-func (file VisitData) visit(v chan VisitData) {
-	if terminated() {
+func (ws *WalkState) visitFile(file VisitData) {
+	if ws.terminated() {
 		return
 	}
 
-	err := file.walkFn(file.path, file.info, nil)
+	err := ws.walkFn(file.path, file.info, nil)
 	if err != nil {
 		if !(file.info.IsDir() && err == SkipDir) {
-			setTerminated(err)
+			ws.setTerminated(err)
 		}
 		return
 	}
@@ -70,9 +91,9 @@ func (file VisitData) visit(v chan VisitData) {
 
 	names, err := readDirNames(file.path)
 	if err != nil {
-		err = file.walkFn(file.path, file.info, err)
+		err = ws.walkFn(file.path, file.info, err)
 		if err != nil {
-			setTerminated(err)
+			ws.setTerminated(err)
 		}
 		return
 	}
@@ -82,27 +103,27 @@ func (file VisitData) visit(v chan VisitData) {
 		file.path = Join(here, name)
 		file.info, err = lstat(file.path)
 		if err != nil {
-			err = file.walkFn(file.path, file.info, err)
+			err = ws.walkFn(file.path, file.info, err)
 			if err != nil && (!file.info.IsDir() || err != SkipDir) {
-				setTerminated(err)
+				ws.setTerminated(err)
 				return
 			}
 		} else {
 			switch file.info.IsDir() {
 			case true:
-				active.Add(1) // presume channel send will succeed
+				ws.active.Add(1) // presume channel send will succeed
 				select {
-				case v <- file:
+				case ws.v <- file:
 					// push directory info to queue for concurrent traversal
 				default:
 					// undo increment when send fails and handle now
-					active.Add(-1)
-					file.visit(v)
+					ws.active.Add(-1)
+					ws.visitFile(file)
 				}
 			case false:
-				err = file.walkFn(file.path, file.info, nil)
+				err = ws.walkFn(file.path, file.info, nil)
 				if err != nil {
-					setTerminated(err)
+					ws.setTerminated(err)
 					return
 				}
 			}
@@ -110,30 +131,10 @@ func (file VisitData) visit(v chan VisitData) {
 	}
 }
 
-func terminated() bool {
-	lock.RLock()
-	done := firstError != nil
-	lock.RUnlock()
-	return done
-}
-
-// record error and terminate walk
-func setTerminated(err error) {
-	lock.Lock()
-	if firstError == nil {
-		firstError = err
-	}
-	lock.Unlock()
-	return
-}
-
 // Walk walks the file tree rooted at root, calling walkFn for each file or
 // directory in the tree, including root. All errors that arise visiting files
 // and directories are filtered by walkFn. The files are walked in a random
 // order. Walk does not follow symbolic links.
-
-var lock sync.RWMutex
-var firstError error
 
 func Walk(root string, walkFn WalkFunc) error {
 	info, err := os.Lstat(root)
@@ -141,19 +142,24 @@ func Walk(root string, walkFn WalkFunc) error {
 		return walkFn(root, nil, err)
 	}
 
-	v := make(chan VisitData, 1024)
-	defer close(v)
+	ws := &WalkState{
+		walkFn: walkFn,
+		v:      make(chan VisitData, 1024),
+	}
 
-	active.Add(1)
-	v <- VisitData{root, info, walkFn}
+	// v := make(chan VisitData, 1024)
+	defer close(ws.v)
+
+	ws.active.Add(1)
+	ws.v <- VisitData{root, info}
 
 	walkers := 16
 	for i := 0; i < walkers; i++ {
-		go visitChannel(v)
+		go ws.visitChannel()
 	}
-	active.Wait()
+	ws.active.Wait()
 
-	return firstError
+	return ws.firstError
 }
 
 //
