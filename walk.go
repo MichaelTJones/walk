@@ -44,7 +44,7 @@ type VisitData struct {
 type WalkState struct {
 	walkFn     WalkFunc
 	v          chan VisitData // files to be processed
-	active     sync.WaitGroup // files in process
+	active     sync.WaitGroup // number of files in process
 	lock       sync.RWMutex
 	firstError error // accessed using lock
 }
