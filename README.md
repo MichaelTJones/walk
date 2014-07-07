@@ -5,8 +5,8 @@ Fast parallel version of golang filepath.Walk()
 
 Performs traversals in parallel so set GOMAXPROCS appropriately. Vaues of 8 to 16 seem to work best on my 
 4-CPU plus 4 SMT pseudo-CPU MacBookPro. The result is about 4x-6x the traversal rate of the standard Walk().
-The two are not identical since we are walking the file ystem in a tumult of asynchronous walkFunc calls by
-any number of goroutines. So, take note of the following:
+The two are not identical since we are walking the file system in a tumult of asynchronous walkFunc calls by
+a number of goroutines. So, take note of the following:
 
 1. This walk honors all of the walkFunc error semantics but as multiple user-supplied walkFuncs may simultaneously encounter a traversal error or generate one to stop traversal, only the FIRST of these will be returned as the Walk() result. 
 
