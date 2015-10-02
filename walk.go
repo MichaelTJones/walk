@@ -152,7 +152,7 @@ func Walk(root string, walkFn WalkFunc) error {
 	ws.active.Add(1)
 	ws.v <- VisitData{root, info}
 
-	walkers := 32
+	walkers := 64
 	for i := 0; i < walkers; i++ {
 		go ws.visitChannel()
 	}
