@@ -9,6 +9,7 @@ package walk
 import (
 	"errors"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -152,7 +153,7 @@ func Walk(root string, walkFn WalkFunc) error {
 	ws.active.Add(1)
 	ws.v <- VisitData{root, info}
 
-	walkers := 64
+	walkers := runtime.GOMAXPROCS
 	for i := 0; i < walkers; i++ {
 		go ws.visitChannel()
 	}
